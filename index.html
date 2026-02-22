@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pro版雲端記帳 V18 - 真·視覺引擎版</title>
+    <!-- 載入核心框架 -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .glass-panel-base { backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); box-shadow: 0 8px 32px rgba(0,0,0,0.1); border: 1px solid rgba(255,255,255,0.3); }
+        input[type="month"]::-webkit-calendar-picker-indicator,
+        input[type="date"]::-webkit-calendar-picker-indicator { background: transparent; cursor: pointer; }
+        /* 背景容器，用於處理旋轉與縮放而不影響內容 */
+        #bg-canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: -1; overflow: hidden; pointer-events: none; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans antialiased m-0 p-0 selection:bg-red-400 selection:text-white">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // === 鎖定預設類別庫 (不可刪除/修改) ===
+        const baseExp = [
+            { name: '餐飲', icon: 'fa-utensils', color: 'text-orange-500', hex: '#f97316', isDefault: true },
+            { name: '遊戲', icon: 'fa-gamepad', color: 'text-purple-500', hex: '#a855f7', isDefault: true },
+            { name: '醫療', icon: 'fa-briefcase-medical', color: 'text-red-500', hex: '#ef4444', isDefault: true },
+            { name: '交通', icon: 'fa-bus', color: 'text-blue-400', hex: '#60a5fa', isDefault: true },
+            { name: '其他', icon: 'fa-border-all', color: 'text-gray-400', hex: '#9ca3af', isDefault: true }
+        ];
+        const baseInc = [ 
+            { name: '薪水', icon: 'fa-wallet', color: 'text-green-500', hex: '#22c55e', isDefault: true },
+            { name: '獎金', icon: 'fa-sack-dollar', color: 'text-yellow-500', hex: '#eab308', isDefault: true }
+        ];
+
+        const PREDEFINED_ICONS = ['fa-utensils', 'fa-mug-hot', 'fa-bag-shopping', 'fa-gamepad', 'fa-plane', 'fa-bus', 'fa-dumbbell', 'fa-music', 'fa-house', 'fa-wallet', 'fa-sack-dollar', 'fa-chart-line', 'fa-microchip', 'fa-camera', 'fa-gift', 'fa-heart', 'fa-bolt', 'fa-star'];
+
+        const App = () => {
+            // ================= 1. 核心狀態管理 =================
+            const [activeTab, setActiveTab] = useState('home'); 
+            const [isAdding, setIsAdding] = useState(false); 
+            const [isMenuOpen, setIsMenuOpen] = useState(false);
+            const [showDatePicker, setShowDatePicker] = useState(false);
+            const [tempYear, setTempYear] = useState('');
+            const [currentMonth, setCurrentMonth] = useState(() => `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`);
+            
+            // 資料與 API
+            const [records, setRecords] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [apiUrl, setApiUrl] = useState(localStorage.getItem('gs_api_url') || '');
+            const [apiToken, setApiToken] = useState(localStorage.getItem('gs_api_token') || '12345');
+            const [geminiKey, setGeminiKey] = useState(localStorage.getItem('gemini_api_key') || '');
+            
+            // 視覺主題設定 (新增 rotation 支援)
+            const [appTheme, setAppTheme] = useState(() => JSON.parse(localStorage.getItem('app_theme')) || { type: 'color', value: '#f3f4f6' });
+            const [bgImage, setBgImage] = useState(() => localStorage.getItem('custom_bg') || '');
+            const [bgSettings, setBgSettings] = useState(() => JSON.parse(localStorage.getItem('bg_settings')) || { zoom: 100, x: 50, y: 50, rotate: 0 });
+            const [glassOpacity, setGlassOpacity] = useState(() => Number(localStorage.getItem('glass_opacity')) || 0.85);
+
+            // 分類與報表
+            const [expenseCategories, setExpenseCategories] = useState(() => JSON.parse(localStorage.getItem('exp_cats')) || baseExp);
+            const [incomeCategories, setIncomeCategories] = useState(() => JSON.parse(localStorage.getItem('inc_cats')) || baseInc);
+            const [reportType, setReportType] = useState('支出'); 
+            const [catType, setCatType] = useState('支出');
+            const [isEditingCats, setIsEditingCats] = useState(false);
+            const [editingCatIdx, setEditingCatIdx] = useState(-1); // -1 代表新增模式
+            const [selectedCategory, setSelectedCategory] = useState(null); 
+            const [newCat, setNewCat] = useState({ name: '', icon: 'fa-star', color: '', hex: '#3b82f6', isCustomUrl: false, customUrl: '', isDefault: false });
+
+            // 表單
+            const [form, setForm] = useState({ type: '支出', category: '餐飲', item: '', amount: '', note: '', date: new Date().toISOString().split('T')[0] });
+            const [aiInput, setAiInput] = useState('');
+            const [isAiProcessing, setIsAiProcessing] = useState(false);
+
+            useEffect(() => {
+                localStorage.setItem('app_theme', JSON.stringify(appTheme));
+                localStorage.setItem('bg_settings', JSON.stringify(bgSettings));
+                localStorage.setItem('glass_opacity', glassOpacity);
+                localStorage.setItem('exp_cats', JSON.stringify(expenseCategories));
+                localStorage.setItem('inc_cats', JSON.stringify(incomeCategories));
+            }, [appTheme, bgSettings, glassOpacity, expenseCategories, incomeCategories]);
+
+            const glassStyle = { background: `rgba(255, 255, 255, ${glassOpacity})`, backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' };
+
+            // ================= 2. 數據計算系統 =================
+            const currentMonthRecords = useMemo(() => {
+                return records.filter(r => r.日期 && r.日期.includes(currentMonth)).sort((a,b) => new Date(b.日期) - new Date(a.日期)); 
+            }, [records, currentMonth]);
+
+            const totals = useMemo(() => {
+                let inc = 0, exp = 0;
+                currentMonthRecords.forEach(r => { if (r.收支 === '收入') inc += Number(r.金額)||0; else exp += Number(r.金額)||0; });
+                return { income: inc, expense: exp, balance: inc - exp };
+            }, [currentMonthRecords]);
+
+            const categoryBreakdown = useMemo(() => {
+                const dataMap = {}; let total = 0;
+                currentMonthRecords.filter(r => r.收支 === '支出').forEach(r => {
+                    const amt = Number(r.金額) || 0; dataMap[r.類別] = (dataMap[r.類別] || 0) + amt; total += amt;
+                });
+                return Object.keys(dataMap).map(name => {
+                    const catObj = expenseCategories.find(c => c.name === name) || { hex: '#9ca3af' };
+                    return { name, value: dataMap[name], pct: total ? (dataMap[name]/total*100) : 0, hex: catObj.hex };
+                }).sort((a,b) => b.value - a.value);
+            }, [currentMonthRecords, expenseCategories]);
+
+            const groupedRecords = useMemo(() => {
+                const groups = {}; const weekdays = ['日','一','二','三','四','五','六'];
+                currentMonthRecords.forEach(r => {
+                    const d = new Date(r.日期); const dateKey = `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} 星期${weekdays[d.getDay()]}`;
+                    if (!groups[dateKey]) groups[dateKey] = { records: [], dailyTotal: 0 };
+                    groups[dateKey].records.push(r); groups[dateKey].dailyTotal += (r.收支 === '收入' ? (Number(r.金額)||0) : -(Number(r.金額)||0));
+                });
+                return groups;
+            }, [currentMonthRecords]);
+
+            const reportData = useMemo(() => {
+                const type = (reportType === '結餘') ? '支出' : reportType;
+                const dataMap = {}; let total = 0;
+                currentMonthRecords.filter(r => r.收支 === type).forEach(r => {
+                    const amt = Number(r.金額) || 0; dataMap[r.類別] = (dataMap[r.類別] || 0) + amt; total += amt;
+                });
+                return Object.keys(dataMap).map(catName => {
+                    const list = type === '收入' ? incomeCategories : expenseCategories;
+                    const catObj = list.find(c => c.name === catName) || { name: catName, icon: 'fa-border-all', color: 'text-gray-400', hex: '#9ca3af' };
+                    return { name: catName, value: dataMap[catName], pct: total ? (dataMap[catName]/total*100) : 0, ...catObj };
+                }).sort((a,b) => b.value - a.value); 
+            }, [currentMonthRecords, reportType, incomeCategories, expenseCategories]);
+
+            const trendData = useMemo(() => {
+                const months = []; const [y, m] = currentMonth.split('-').map(Number);
+                for(let i=2; i>=0; i--){ let d = new Date(y, m-1-i, 1); months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`); }
+                return months.map(mStr => {
+                    let inc=0, exp=0; records.filter(r => r.日期 && r.日期.includes(mStr)).forEach(r => { if(r.收支 === '收入') inc += Number(r.金額)||0; else exp += Number(r.金額)||0; });
+                    return { month: mStr.split('-')[1]+'月', bal: inc-exp, inc, exp };
+                });
+            }, [records, currentMonth]);
+
+            // ================= 3. 通用功能 =================
+            const fetchFromCloud = async () => {
+                if (!apiUrl) return; setLoading(true);
+                try {
+                    const res = await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ action: 'get', token: apiToken }) });
+                    const data = await res.json();
+                    if (data.status !== 'error') setRecords(Array.isArray(data) ? data : []);
+                } catch (e) { console.log(e); } finally { setLoading(false); }
+            };
+            useEffect(() => { if(apiUrl) fetchFromCloud(); }, [apiUrl, apiToken]);
+
+            const saveToCloud = async (e) => {
+                e.preventDefault(); setLoading(true);
+                try {
+                    await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ ...form, action: 'add', token: apiToken }) });
+                    setForm({ ...form, item: '', amount: '', note: '' }); setIsAdding(false); await fetchFromCloud();
+                } catch (e) { alert('同步失敗'); } finally { setLoading(false); }
+            };
+
+            const handleAIParse = async () => {
+                if (!geminiKey || !aiInput.trim()) return alert("設定錯誤"); setIsAiProcessing(true);
+                try {
+                    const prompt = `解析JSON陣列。限用支出/收入。輸入:"${aiInput}"。格式:[{"type":"支出/收入","category":"分類","item":"項目","amount":數字,"note":"備註"}]`;
+                    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json" } })
+                    });
+                    const data = await res.json();
+                    const list = JSON.parse(data.candidates[0].content.parts[0].text.replace(/```json|```/g, '').trim());
+                    for (const r of (Array.isArray(list)?list:[list])) { await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ ...r, date: form.date, action: 'add', token: apiToken }) }); }
+                    alert("AI 已完成解析與紀錄！"); setAiInput(''); setIsAdding(false); await fetchFromCloud();
+                } catch (e) { alert("AI 解析失敗"); } finally { setIsAiProcessing(false); }
+            };
+
+            const deleteRecord = async (rowIndex) => {
+                if (!confirm('刪除這筆紀錄？')) return; setLoading(true);
+                try { await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ action: 'delete', rowIndex, token: apiToken }) }); await fetchFromCloud(); } 
+                catch (e) { alert('失敗'); } finally { setLoading(false); }
+            };
+
+            const handleImageUpload = (e, target = 'bg') => {
+                e.preventDefault();
+                const file = e.dataTransfer ? e.dataTransfer.files[0] : e.target.files[0];
+                if (!file || !file.type.startsWith('image/')) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image(); img.onload = () => {
+                        const canvas = document.createElement('canvas'); 
+                        const max = target === 'cat' ? 150 : 1200;
+                        let w = img.width, h = img.height;
+                        if (w > max || h > max) { if (w > h) { h = Math.round(h * max / w); w = max; } else { w = Math.round(w * max / h); h = max; } }
+                        canvas.width = w; canvas.height = h;
+                        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                        const base64 = canvas.toDataURL('image/jpeg', 0.8);
+                        if(target === 'cat') { setNewCat({...newCat, isCustomUrl: true, customUrl: base64}); }
+                        else { try { localStorage.setItem('custom_bg', base64); setBgImage(base64); setAppTheme({ type: 'custom' }); } catch(err) { alert('圖片體積過大，請選較小的圖片！'); } }
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const renderIcon = (cat, size = "text-lg") => {
+                if (cat.isCustomUrl && cat.customUrl) return <img src={cat.customUrl} className="w-full h-full object-cover rounded-xl" onError={(e)=>{e.target.src='https://via.placeholder.com/150?text=Error'}} />;
+                return <i className={`fa-solid ${cat.icon || 'fa-border-all'} ${size} ${cat.isDefault ? cat.color : ''}`} style={!cat.isDefault ? {color: cat.hex} : {}}></i>;
+            };
+
+            // ================= 4. 視圖渲染函數 =================
+
+            const renderHome = () => (
+                <div className="pb-24 animate-in fade-in duration-300 overflow-y-auto no-scrollbar h-screen px-4">
+                    <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/40 flex justify-between items-center sticky top-4 z-10">
+                        <button onClick={() => setIsMenuOpen(true)} className="p-1 active:scale-90 transition"><i className="fa-solid fa-bars text-gray-500 text-xl"></i></button>
+                        <div className="font-black text-lg bg-white/60 px-3 py-1 rounded-xl border border-white/50 cursor-pointer flex items-center gap-1 shadow-sm" onClick={() => { setTempYear(currentMonth.split('-')[0]); setShowDatePicker(true); }}>
+                            {currentMonth.split('-')[0]}年{currentMonth.split('-')[1]}月 <i className="fa-solid fa-caret-down text-sm text-gray-500"></i>
+                        </div>
+                        <button onClick={fetchFromCloud} className={loading ? 'animate-spin text-blue-500' : 'text-gray-600'}><i className="fa-solid fa-rotate-right text-lg"></i></button>
+                    </div>
+
+                    <div style={glassStyle} className="glass-panel-base mt-6 py-6 px-6 rounded-[40px] border border-white/60 shadow-xl relative overflow-hidden text-center">
+                        <div className="flex justify-between mb-4 relative z-10">
+                            <div className="cursor-pointer hover:opacity-70 transition-opacity" onClick={() => {setReportType('支出'); setActiveTab('report');}}>
+                                <p className="text-gray-400 font-black text-[10px] uppercase tracking-widest border-b-2 border-yellow-400 pb-1">月支出</p>
+                                <p className="text-2xl font-black mt-1 text-gray-800">${totals.expense.toLocaleString()}</p>
+                            </div>
+                            <div className="text-right cursor-pointer hover:opacity-70 transition-opacity" onClick={() => {setReportType('收入'); setActiveTab('report');}}>
+                                <p className="text-blue-400 font-black text-[10px] uppercase tracking-widest border-b-2 border-blue-400 pb-1 text-nowrap">月收入</p>
+                                <p className="text-2xl font-black mt-1 text-gray-800">${totals.income.toLocaleString()}</p>
+                            </div>
+                        </div>
+                        <div className="flex justify-center relative my-4 cursor-pointer hover:scale-105 transition-transform" onClick={() => {setReportType('支出'); setActiveTab('report');}}>
+                            <svg viewBox="0 0 42 42" className="w-48 h-48 drop-shadow-2xl">
+                                <circle r="15.915" cx="21" cy="21" fill="transparent" stroke="#f3f4f6" strokeWidth="6" />
+                                {(() => {
+                                    let off = 25;
+                                    return categoryBreakdown.map((d, i) => {
+                                        const ret = <circle key={i} r="15.915" cx="21" cy="21" fill="transparent" stroke={d.hex} strokeWidth="6" strokeDasharray={`${d.pct} ${100-d.pct}`} strokeDashoffset={off} className="transition-all duration-700" />;
+                                        off -= d.pct; return ret;
+                                    });
+                                })()}
+                            </svg>
+                            <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                <p className="text-[10px] text-gray-400 font-black tracking-widest uppercase">月結餘</p>
+                                <p className="text-2xl font-black text-gray-800 tracking-tighter">${totals.balance.toLocaleString()}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mt-6 space-y-4">
+                        {Object.keys(groupedRecords).map(date => (
+                            <div key={date} style={glassStyle} className="glass-panel-base rounded-3xl overflow-hidden border border-white/60 shadow-lg">
+                                <div className="bg-white/40 px-5 py-2.5 flex justify-between border-b border-white/40 font-black text-xs text-gray-500 uppercase tracking-tighter items-center">
+                                    <span>{date}</span> <span className={groupedRecords[date].dailyTotal<0?'text-yellow-600':''}>${groupedRecords[date].dailyTotal.toLocaleString()}</span>
+                                </div>
+                                <div className="divide-y divide-gray-200/40">
+                                    {groupedRecords[date].records.map((r, i) => {
+                                        const cat = (r.收支 === '收入' ? incomeCategories : expenseCategories).find(c=>c.name===r.類別) || {icon:'fa-border-all', color:'text-gray-400', hex:'#9ca3af'};
+                                        return (
+                                            <div key={i} className="px-5 py-4 flex justify-between group relative overflow-hidden items-center hover:bg-white/30 transition-colors">
+                                                <div className="flex items-center gap-4 z-10">
+                                                    <div className={`w-11 h-11 rounded-2xl bg-white shadow-md flex justify-center items-center overflow-hidden`}>{renderIcon(cat)}</div>
+                                                    <div><p className="font-bold text-sm text-gray-800 leading-tight">{r.項目}</p><p className="text-[10px] text-gray-400 mt-1 font-bold italic">{r.類別} {r.備註}</p></div>
+                                                </div>
+                                                <div className="font-black text-gray-800 z-10 text-sm tracking-tight">${Number(r.金額).toLocaleString()}</div>
+                                                <button onClick={() => deleteRecord(r._rowIndex)} className="absolute right-0 top-0 bottom-0 bg-red-500/90 text-white w-16 flex justify-center items-center translate-x-full group-hover:translate-x-0 transition-transform font-bold text-xs shadow-inner">刪除</button>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+
+            const renderCategoryManager = () => {
+                const list = catType === '支出' ? expenseCategories : incomeCategories;
+                const totalByCat = {};
+                currentMonthRecords.filter(r => r.收支 === catType).forEach(r => { totalByCat[r.類別] = (totalByCat[r.類別] || 0) + (Number(r.金額) || 0); });
+                return (
+                    <div className="pb-24 min-h-screen animate-in fade-in duration-300 overflow-y-auto no-scrollbar px-4">
+                        <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center">
+                            <button onClick={()=>setActiveTab('home')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100">&lt; 返回</button>
+                            <h2 className="flex-1 text-center font-black text-lg">分類管理</h2>
+                            <button onClick={()=>{ setEditingCatIdx(-1); setIsEditingCats(true); }} className="p-2 bg-white rounded-lg shadow-sm border text-gray-600 active:scale-90 transition shadow-lg"><i className="fa-solid fa-pen-to-square"></i></button>
+                        </div>
+                        <div className="mt-6">
+                            <div className="flex bg-white/60 rounded-2xl p-1 mb-6 border border-white/50 shadow-sm">
+                                <button onClick={()=>setCatType('支出')} className={`flex-1 py-3 font-bold rounded-xl transition-all ${catType==='支出'?'bg-yellow-400 shadow-md text-gray-900':'text-gray-500'}`}>支出</button>
+                                <button onClick={()=>setCatType('收入')} className={`flex-1 py-3 font-bold rounded-xl transition-all ${catType==='收入'?'bg-blue-400 text-white shadow-md':'text-gray-500'}`}>收入</button>
+                            </div>
+                            <div className="grid grid-cols-1 gap-4">
+                                {list.map(c => (
+                                    <div key={c.name} onClick={() => { setSelectedCategory({ ...c, type: catType }); setActiveTab('categoryDetail'); }}
+                                         style={glassStyle} className="glass-panel-base p-5 rounded-[32px] flex justify-between items-center cursor-pointer active:scale-95 hover:scale-[1.02] transition-all border border-white/40 shadow-md">
+                                        <div className="flex items-center gap-4">
+                                            <div className={`w-14 h-14 rounded-2xl bg-white shadow-inner flex justify-center items-center overflow-hidden`}>{renderIcon(c, "text-xl")}</div>
+                                            <div><p className="font-black text-gray-800 text-lg leading-none mb-1">{c.name}</p><p className="text-[9px] text-gray-400 font-black uppercase tracking-[0.2em]">View Details</p></div>
+                                        </div>
+                                        <p className="font-black text-gray-800 text-xl tracking-tighter">${(totalByCat[c.name] || 0).toLocaleString()}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderCategoryDetail = () => {
+                if (!selectedCategory) return null;
+                const filtered = currentMonthRecords.filter(r => r.類別 === selectedCategory.name && r.收支 === selectedCategory.type);
+                const sum = filtered.reduce((acc, r) => acc + (Number(r.金額) || 0), 0);
+                return (
+                    <div className="pb-24 min-h-screen animate-in slide-in-from-right duration-300 overflow-y-auto no-scrollbar px-4">
+                        <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center">
+                            <button onClick={()=>setActiveTab('categories')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm">&lt; 返回</button>
+                            <h2 className="flex-1 text-center font-black text-lg px-2 truncate text-gray-800">{selectedCategory.name} 明細</h2><div className="w-16"></div>
+                        </div>
+                        <div className="mt-6">
+                            <div style={glassStyle} className="glass-panel-base p-10 rounded-[48px] mb-8 text-center border border-white/80 shadow-2xl">
+                                <div className={`w-20 h-20 rounded-[28px] bg-white mx-auto flex justify-center items-center shadow-xl mb-4 overflow-hidden`}>{renderIcon(selectedCategory, "text-3xl")}</div>
+                                <p className="text-[10px] text-gray-400 font-black tracking-widest uppercase mb-1">{selectedCategory.name} 本月計</p>
+                                <p className="text-4xl font-black text-gray-800 tracking-tighter">${sum.toLocaleString()}</p>
+                            </div>
+                            <div className="space-y-4 px-1">
+                                {filtered.map((r, i) => (
+                                    <div key={i} style={glassStyle} className="glass-panel-base p-5 rounded-3xl flex justify-between items-center border border-white/40 transition-all hover:bg-white/40 shadow-sm">
+                                        <div className="flex-1"><p className="font-bold text-gray-800 text-base">{r.項目}</p><p className="text-[10px] text-gray-400 font-black uppercase tracking-tighter mt-1">{r.日期.split(' ')[0]}</p></div>
+                                        <p className="font-black text-gray-800 text-xl tracking-tight">${Number(r.金額).toLocaleString()}</p>
+                                    </div>
+                                ))}
+                                {filtered.length === 0 && <p className="text-center py-20 text-gray-300 font-black italic uppercase tracking-widest">No Data Found</p>}
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderEditCatsModal = () => {
+                const list = catType === '支出' ? expenseCategories : incomeCategories;
+                const setList = catType === '支出' ? setExpenseCategories : setIncomeCategories;
+                const handleSaveCat = () => { 
+                    if(!newCat.name.trim()) return alert("請輸入名稱"); 
+                    const newList = [...list];
+                    if (editingCatIdx > -1) newList[editingCatIdx] = { ...newCat };
+                    else newList.push({ ...newCat, isDefault: false });
+                    setList(newList); setEditingCatIdx(-1);
+                    setNewCat({ name: '', icon: 'fa-star', color: 'text-blue-500', hex: '#3b82f6', isCustomUrl: false, customUrl: '', isDefault: false }); 
+                };
+                return (
+                    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4 backdrop-blur-md animate-in fade-in">
+                        <div style={glassStyle} className="glass-panel-base w-full max-w-sm p-6 rounded-[48px] border border-white/50 shadow-2xl animate-in zoom-in max-h-[90vh] overflow-y-auto no-scrollbar text-gray-800">
+                            <h3 className="font-black text-2xl mb-2 text-center tracking-tighter">類別大師編輯器</h3>
+                            <p className="text-[9px] text-gray-400 text-center mb-6 uppercase tracking-[0.3em]">Configure Categories</p>
+                            <div className="space-y-2 mb-6">
+                                {list.map((c, i) => (
+                                    <div key={i} className={`p-4 rounded-3xl flex justify-between items-center border transition-all ${editingCatIdx === i ? 'bg-blue-50 border-blue-300 shadow-inner' : 'bg-white/60 border-white shadow-sm'}`}>
+                                        <div className="flex items-center gap-3"><div className={`w-11 h-11 rounded-2xl bg-white flex justify-center items-center shadow-sm overflow-hidden`}>{renderIcon(c)}</div><span className="font-black text-sm text-gray-700">{c.name}</span></div>
+                                        <div className="flex gap-1">
+                                            {!c.isDefault && <button onClick={()=> {setEditingCatIdx(i); setNewCat({...c}); }} className="text-gray-400 p-2 hover:text-blue-500 transition-colors"><i className="fa-solid fa-pen"></i></button>}
+                                            {!c.isDefault && <button onClick={()=>{const n=[...list]; n.splice(i,1); setList(n);}} className="text-red-400 p-2 active:scale-90"><i className="fa-solid fa-trash-can"></i></button>}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="bg-white/80 p-6 rounded-[40px] border border-white/50 space-y-5 shadow-inner">
+                                <input type="text" placeholder="分類名稱" value={newCat.name} onChange={e=>setNewCat({...newCat, name:e.target.value})} className="w-full border-2 border-gray-100 p-4 rounded-2xl outline-none font-bold text-sm shadow-sm focus:border-blue-400 transition-all" />
+                                <div className="grid grid-cols-2 gap-4">
+                                    <label onDrop={(e)=>handleImageUpload(e, 'cat')} onDragOver={e=>e.preventDefault()} className="flex flex-col items-center justify-center border-2 border-dashed border-purple-200 p-4 rounded-[24px] bg-purple-50/20 hover:bg-white cursor-pointer h-24 transition-all">
+                                        {newCat.isCustomUrl ? <img src={newCat.customUrl} className="w-12 h-12 rounded-xl object-cover shadow-md mb-1 border-2 border-white" /> : <i className="fa-solid fa-cloud-arrow-up text-2xl text-purple-300"></i>}
+                                        <span className="text-[8px] font-black text-purple-400 mt-1 uppercase tracking-widest text-center">拖曳 Icon</span>
+                                        <input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e, 'cat')} className="hidden" />
+                                    </label>
+                                    <div className="bg-white/70 p-3 rounded-[24px] border border-white shadow-sm flex flex-col items-center justify-center">
+                                        <input type="color" value={newCat.hex} onChange={e=>setNewCat({...newCat, hex:e.target.value})} className="w-12 h-12 rounded-xl cursor-pointer border-none bg-transparent" />
+                                        <span className="text-[9px] font-mono font-black text-gray-400 mt-2 uppercase">{newCat.hex}</span>
+                                    </div>
+                                </div>
+                                <div className="flex gap-2 overflow-x-auto py-2 no-scrollbar border-t">
+                                    {PREDEFINED_ICONS.map(ic => (
+                                        <button key={ic} onClick={()=>setNewCat({...newCat, icon:ic, isCustomUrl:false})} className={`p-2.5 min-w-[40px] rounded-xl transition-all ${newCat.icon===ic?'bg-gray-800 text-white scale-110 shadow-lg':'bg-white text-gray-400 border shadow-sm'}`}><i className={`fa-solid ${ic}`}></i></button>
+                                    ))}
+                                </div>
+                                <button onClick={handleSaveCat} className={`w-full text-white font-black py-4 rounded-[20px] shadow-xl active:scale-95 transition-all text-xs tracking-[0.3em] uppercase ${editingCatIdx > -1 ? 'bg-blue-600' : 'bg-emerald-600'}`}>
+                                    {editingCatIdx > -1 ? '更新分類' : '確認建立'}
+                                </button>
+                                {editingCatIdx > -1 && <button onClick={()=>setEditingCatIdx(-1)} className="w-full text-gray-400 text-[10px] font-bold uppercase tracking-widest">Cancel Editing</button>}
+                            </div>
+                            <button onClick={()=>setIsEditingCats(false)} className="w-full py-4 bg-gray-800 text-white font-black rounded-[24px] mt-6 active:scale-95 transition shadow-2xl tracking-widest text-sm uppercase">Close Editor</button>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderAddForm = () => {
+                const list = form.type === '支出' ? expenseCategories : incomeCategories;
+                return (
+                    <div style={glassStyle} className="fixed inset-0 glass-panel-base z-50 flex flex-col animate-in slide-in-from-bottom duration-200">
+                        <div className="px-4 py-4 flex items-center border-b border-white/50 bg-white/80 shadow-sm sticky top-0 z-10">
+                            <button onClick={() => setIsAdding(false)} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border transition hover:bg-gray-50 active:scale-90">&lt; 返回</button>
+                            <h2 className="flex-1 text-center font-black text-lg text-gray-800">新增紀錄</h2><div className="w-20"></div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-5 no-scrollbar pb-10">
+                            <div className="flex bg-white/80 rounded-2xl p-1 shadow-sm border border-white">
+                                <button onClick={()=>setForm({...form, type:'支出', category: expenseCategories[0].name})} className={`flex-1 py-3 font-bold rounded-xl transition ${form.type==='支出'?'bg-yellow-400 text-gray-900 shadow':'text-gray-500'}`}>支出</button>
+                                <button onClick={()=>setForm({...form, type:'收入', category: incomeCategories[0].name})} className={`flex-1 py-3 font-bold rounded-xl transition ${form.type==='收入'?'bg-blue-400 text-white shadow':'text-gray-500'}`}>收入</button>
+                            </div>
+                            <div className="bg-white/80 p-5 rounded-[32px] shadow-sm border border-white">
+                                <label className="text-[10px] font-black text-gray-400 block mb-2 uppercase tracking-widest ml-1">記帳日期 Select Date</label>
+                                <input type="date" value={form.date} onChange={e=>setForm({...form, date: e.target.value})} className="w-full bg-gray-50 border border-gray-100 p-4 rounded-[20px] font-black outline-none text-gray-700 shadow-inner" />
+                            </div>
+                            <div className="bg-white/80 p-5 rounded-[32px] shadow-sm border border-white">
+                                <p className="text-xs font-bold text-blue-600 mb-3 flex items-center gap-1 uppercase tracking-tighter"><i className="fa-solid fa-wand-magic-sparkles"></i> AI Intelligent Parse</p>
+                                <div className="flex gap-2">
+                                    <input type="text" placeholder="例: 午餐100 坐車50" className="flex-1 bg-white border border-gray-200 rounded-[18px] px-4 outline-none py-3 text-sm shadow-inner" value={aiInput} onChange={e=>setAiInput(e.target.value)} />
+                                    <button onClick={handleAIParse} disabled={isAiProcessing} className="bg-blue-500 text-white px-6 py-3 rounded-[18px] font-black shadow-lg active:scale-95 transition-all text-xs">解析</button>
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-4 px-1">
+                                {list.map(c => (
+                                    <button key={c.name} onClick={()=>setForm({...form, category: c.name})} className={`flex flex-col items-center p-3 rounded-[28px] bg-white shadow-md transition-all ${form.category===c.name?'border-2 border-gray-800 scale-105 shadow-2xl z-10':'border-2 border-transparent opacity-60 hover:opacity-100'}`}>
+                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center overflow-hidden`}>{renderIcon(c)}</div>
+                                        <span className="text-[9px] font-black mt-2 text-gray-700 truncate w-full px-1 text-center uppercase">{c.name}</span>
+                                    </button>
+                                ))}
+                            </div>
+                            <form onSubmit={saveToCloud} className="space-y-4 bg-white/80 p-8 rounded-[40px] shadow-xl border border-white">
+                                <input type="text" required placeholder="項目名稱 (如：Steam 遊戲)" value={form.item} onChange={e=>setForm({...form, item:e.target.value})} className="w-full border border-gray-100 p-4 rounded-2xl outline-none focus:border-gray-800 font-bold shadow-inner" />
+                                <input type="number" required placeholder="$ 金額" value={form.amount} onChange={e=>setForm({...form, amount:e.target.value})} className="w-full border border-gray-100 p-4 rounded-2xl outline-none text-4xl font-black text-gray-800 shadow-inner" />
+                                <button type="submit" disabled={loading} className="w-full bg-gray-800 text-white font-black py-6 rounded-[28px] mt-4 shadow-2xl hover:bg-black active:scale-95 transition-all tracking-[0.5em] text-sm uppercase">確認寫入</button>
+                            </form>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderReportView = () => {
+                return (
+                    <div className="pb-24 min-h-screen animate-in fade-in duration-300 overflow-y-auto no-scrollbar px-4">
+                        <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center">
+                            <button onClick={()=>setActiveTab('home')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border transition">&lt; 返回</button>
+                            <div className="flex-1 flex justify-center px-2">
+                                <div className="flex bg-white/80 rounded-xl p-1 shadow-sm border border-white">
+                                    {['支出', '收入', '結餘'].map(t => (
+                                        <button key={t} onClick={()=>setReportType(t)} className={`px-4 py-1.5 font-bold text-[10px] rounded-lg transition-all ${reportType===t?'bg-gray-800 text-white shadow-lg':'text-gray-500'}`}>{t}</button>
+                                    ))}
+                                </div>
+                            </div><div className="w-16"></div>
+                        </div>
+                        {reportType !== '結餘' ? (
+                            <div style={glassStyle} className="glass-panel-base mt-6 pt-10 pb-6 rounded-[48px] border border-white/50 shadow-xl text-center">
+                                <div className="flex justify-center relative">
+                                    <svg viewBox="0 0 42 42" className="w-64 h-64 drop-shadow-2xl">
+                                        <circle r="15.915" cx="21" cy="21" fill="transparent" stroke="#f3f4f6" strokeWidth="6" />
+                                        {(() => { let off = 25; return reportData.map((d, i) => { const ret = <circle key={i} r="15.915" cx="21" cy="21" fill="transparent" stroke={d.hex} strokeWidth="6" strokeDasharray={`${d.pct} ${100-d.pct}`} strokeDashoffset={off} className="transition-all duration-700" />; off-=d.pct; return ret; }); })()}
+                                    </svg>
+                                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                        <p className="text-[10px] text-gray-400 font-black tracking-widest uppercase">總計{reportType}</p>
+                                        <p className="text-4xl font-black text-gray-800 tracking-tighter">${totals[reportType === '支出' ? 'expense' : 'income'].toLocaleString()}</p>
+                                    </div>
+                                </div>
+                                <div className="mt-10 px-4 divide-y divide-gray-200/50 bg-white/60 mx-4 rounded-3xl shadow-inner border border-white/50 overflow-hidden">
+                                    {reportData.map((d, i) => (
+                                        <div key={i} className="p-5 flex justify-between items-center transition hover:bg-white/50">
+                                            <div className="flex items-center gap-4 text-left"><div className="w-10 h-10 rounded-2xl flex justify-center items-center text-white text-[12px] overflow-hidden shadow-md" style={{backgroundColor:d.hex}}>{renderIcon(d, "text-xs")}</div><div><p className="font-black text-gray-800 text-sm">{d.name}</p><p className="text-[9px] font-bold text-gray-400 uppercase">{d.pct.toFixed(1)}% Share</p></div></div>
+                                            <p className="font-black text-gray-800 text-base">${d.value.toLocaleString()}</p>
+                                        </div>
+                                    ))}
+                                    {reportData.length === 0 && <p className="p-16 text-gray-400 font-black italic tracking-widest">No Records Yet</p>}
+                                </div>
+                            </div>
+                        ) : (
+                            <div style={glassStyle} className="glass-panel-base mt-6 pt-10 pb-12 rounded-[48px] border border-white/50 shadow-xl px-8 text-center">
+                                <h3 className="font-black text-xl text-gray-800 mb-2 tracking-tighter">資產水位趨勢</h3>
+                                <p className="text-[9px] text-gray-400 font-black uppercase tracking-[0.4em] mb-10">Last 3 Months Trend</p>
+                                <div className="flex justify-between items-end h-40 gap-4 border-b-4 border-gray-100 pb-2 mb-6 px-4">
+                                    {trendData.map((d, i) => {
+                                        const maxVal = Math.max(...trendData.map(t => Math.max(t.inc, t.exp, Math.abs(t.bal))), 1);
+                                        return (
+                                            <div key={i} className="flex flex-col items-center h-full justify-end flex-1">
+                                                <div className="flex gap-1.5 items-end w-full h-full justify-center">
+                                                    <div className="w-4 bg-yellow-400 rounded-t-lg shadow-sm transition-all duration-1000" style={{height: (d.exp/maxVal)*100+'%'}}></div>
+                                                    <div className="w-4 bg-blue-400 rounded-t-lg shadow-sm transition-all duration-1000" style={{height: (d.inc/maxVal)*100+'%'}}></div>
+                                                </div>
+                                                <div className={`text-[10px] font-black mt-3 ${d.bal>=0?'text-green-600':'text-red-500'}`}>{d.bal.toLocaleString()}</div>
+                                                <div className="text-[10px] text-gray-400 font-black mt-1 uppercase tracking-tighter">{d.month}</div>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                                <p className="text-[10px] text-gray-400 italic font-medium">黃色為支出，藍色為收入</p>
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+            const renderSettingsView = () => (
+                <div className="pb-24 min-h-screen animate-in fade-in duration-300 no-scrollbar overflow-y-auto px-5 pt-6 text-gray-800">
+                    <div className="flex items-center mb-8">
+                        <button onClick={()=>setActiveTab('home')} className="p-3 bg-white rounded-2xl shadow-md border active:scale-90 transition mr-5 text-gray-500"><i className="fa-solid fa-angle-left text-xl"></i></button>
+                        <h2 className="font-black text-2xl tracking-tighter uppercase">視覺與系統引擎</h2>
+                    </div>
+                    <div className="space-y-6">
+                        <div style={glassStyle} className="glass-panel-base p-7 rounded-[40px] border border-white/60 shadow-xl space-y-4">
+                            <h3 className="font-black border-b border-gray-200/50 pb-3 flex items-center gap-3 text-sm uppercase tracking-widest"><i className="fa-solid fa-cloud text-blue-500"></i>連線設定 API CONFIG</h3>
+                            <input type="password" placeholder="API 網址" className="w-full bg-white/80 border border-gray-100 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm" value={apiUrl} onChange={e=>{setApiUrl(e.target.value);localStorage.setItem('gs_api_url',e.target.value)}} />
+                            <input type="password" placeholder="資料庫密碼" className="w-full bg-white/80 border border-gray-100 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm" value={apiToken} onChange={e=>{setApiToken(e.target.value);localStorage.setItem('gs_api_token',e.target.value)}} />
+                            <input type="password" placeholder="Gemini AI Key" className="w-full bg-blue-50/80 border border-blue-200 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm font-mono" value={geminiKey} onChange={e=>{setGeminiKey(e.target.value);localStorage.setItem('gemini_api_key',e.target.value)}} />
+                        </div>
+                        <div style={glassStyle} className="glass-panel-base p-7 rounded-[40px] border border-white/60 shadow-xl space-y-6">
+                            <h3 className="font-black border-b border-gray-200/50 pb-3 flex items-center gap-3 text-sm uppercase tracking-widest"><i className="fa-solid fa-palette text-purple-500"></i>介面視覺客製化 CUSTOM UI</h3>
+                            <div className="bg-white/50 p-5 rounded-3xl border border-white/80 shadow-inner">
+                                <label className="text-[11px] font-black text-gray-500 block mb-4 uppercase tracking-widest flex justify-between">面板透明度 OPACITY <span className="text-blue-600 font-bold">{Math.round(glassOpacity * 100)}%</span></label>
+                                <input type="range" min="0.1" max="1" step="0.05" value={glassOpacity} onChange={e=>setGlassOpacity(parseFloat(e.target.value))} className="w-full accent-blue-600 shadow-sm" />
+                            </div>
+                            <div>
+                                <label className="text-[11px] font-black text-gray-400 block mb-4 uppercase tracking-widest px-1">快速背景主題 QUICK THEME</label>
+                                <div className="flex gap-4 overflow-x-auto py-2 no-scrollbar px-1 items-center">
+                                    {['#f3f4f6', '#1e293b', '#fbcfe8', '#bbf7d0', '#bfdbfe', '#2d3436'].map(c => (
+                                        <button key={c} onClick={()=>setAppTheme({type:'color', value:c})} className={`min-w-[48px] h-12 rounded-full border-4 transition-all hover:scale-110 active:scale-90 shadow-md ${appTheme.value === c ? 'border-gray-800 scale-110' : 'border-white'}`} style={{backgroundColor:c}}></button>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="flex gap-4 items-end px-1 pb-2">
+                                <div className="flex-1"><label className="text-[11px] font-black text-gray-400 block mb-3 uppercase tracking-widest">自由選色盤 COLOR PICKER</label>
+                                    <div className="flex items-center gap-4 bg-white/80 p-3 rounded-2xl border border-white shadow-inner"><input type="color" value={appTheme.type==='color'?appTheme.value:'#ffffff'} onChange={e => setAppTheme({type:'color', value: e.target.value})} className="w-11 h-11 rounded-xl cursor-pointer border-none bg-transparent shadow-sm" /><span className="text-xs font-mono font-black text-gray-400 uppercase tracking-widest">{appTheme.value}</span></div>
+                                </div>
+                                <button onClick={()=>setAppTheme({type:'custom'})} className="px-6 py-5 text-xs font-black bg-gray-800 text-white rounded-2xl shadow-2xl flex-shrink-0 active:scale-95 transition-all tracking-tighter">開啟圖片背景</button>
+                            </div>
+                            <label onDrop={(e)=>handleImageUpload(e, 'bg')} onDragOver={e=>e.preventDefault()} className="flex flex-col items-center justify-center border-2 border-dashed border-purple-300 p-12 rounded-[40px] bg-purple-50/40 hover:bg-purple-100/50 cursor-pointer transition-all group">
+                                <i className="fa-solid fa-cloud-arrow-up text-5xl text-purple-400 mb-4 group-hover:scale-110 transition-transform"></i>
+                                <span className="text-[11px] font-black text-purple-800 text-center uppercase tracking-widest leading-relaxed">更換桌布圖片 WALLPAPER ENGINE<br/><span className="text-[8px] font-bold text-purple-400">(直接拖拉圖片至此)</span></span>
+                                <input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e, 'bg')} className="hidden" />
+                            </label>
+                            
+                            {/* 背景控制強化：四合一排版控制器 */}
+                            {bgImage && appTheme.type === 'custom' && (
+                                <div className="bg-white/90 p-8 rounded-[40px] border border-gray-100 shadow-2xl space-y-6 animate-in zoom-in duration-300">
+                                    <p className="text-[11px] font-black text-gray-500 border-b pb-3 uppercase tracking-[0.4em] text-center">Wallpaper Adjustment 2.0</p>
+                                    <div className="space-y-6 px-1">
+                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">比例 Zoom</span><input type="range" min="50" max="350" value={bgSettings.zoom} onChange={e=>setBgSettings({...bgSettings, zoom: parseInt(e.target.value)})} className="flex-1 accent-blue-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.zoom}%</span></div>
+                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">左右 X</span><input type="range" min="0" max="100" value={bgSettings.x} onChange={e=>setBgSettings({...bgSettings, x: parseInt(e.target.value)})} className="flex-1 accent-purple-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.x}%</span></div>
+                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">上下 Y</span><input type="range" min="0" max="100" value={bgSettings.y} onChange={e=>setBgSettings({...bgSettings, y: parseInt(e.target.value)})} className="flex-1 accent-purple-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.y}%</span></div>
+                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-red-500 uppercase tracking-widest">旋轉 Angle</span><input type="range" min="0" max="360" value={bgSettings.rotate} onChange={e=>setBgSettings({...bgSettings, rotate: parseInt(e.target.value)})} className="flex-1 accent-emerald-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.rotate}°</span></div>
+                                    </div>
+                                    <button onClick={()=>setBgSettings({zoom:100, x:50, y:50, rotate:0})} className="w-full text-[9px] font-black text-gray-400 uppercase tracking-widest py-3 border-2 border-gray-100 rounded-2xl hover:bg-gray-50 active:scale-95 transition">Reset All Values</button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+
+            // ================= 5. 底層背景渲染邏輯 =================
+            // 透過獨立 div + transform 達成精準旋轉而不裁切與拉伸
+            const backgroundLayer = (
+                <div id="bg-canvas">
+                    {appTheme.type === 'custom' && bgImage ? (
+                        <div className="w-full h-full transition-all duration-300" 
+                             style={{
+                                 backgroundImage: `url(${bgImage})`,
+                                 backgroundSize: 'auto 100%', // 強制以高度 100% 進行等比例縮放
+                                 backgroundPosition: 'center',
+                                 backgroundRepeat: 'no-repeat',
+                                 transform: `scale(${bgSettings.zoom / 100}) translate(${(bgSettings.x - 50)}%, ${(bgSettings.y - 50)}%) rotate(${bgSettings.rotate}deg)`,
+                                 transformOrigin: 'center center'
+                             }} />
+                    ) : (
+                        <div className="w-full h-full" style={{ backgroundColor: appTheme.value }} />
+                    )}
+                </div>
+            );
+
+            return (
+                <div className="flex flex-col max-w-md mx-auto min-h-screen shadow-2xl relative transition-all duration-500 overflow-hidden">
+                    {backgroundLayer}
+                    
+                    {/* 年月選擇器 Modal */}
+                    {showDatePicker && (
+                        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4 backdrop-blur-md animate-in fade-in duration-200">
+                            <div style={glassStyle} className="glass-panel-base p-10 w-full max-w-xs animate-in zoom-in rounded-[48px] border border-white/50 shadow-2xl">
+                                <div className="flex justify-between items-center mb-8 bg-white/80 p-3 rounded-2xl shadow-inner border border-white">
+                                    <button onClick={() => setTempYear(y => String(Number(y)-1))} className="p-3 text-gray-400 hover:text-gray-800 transition active:scale-90"><i className="fa-solid fa-minus"></i></button>
+                                    <input type="number" value={tempYear} onChange={e => setTempYear(e.target.value)} className="w-24 text-center text-4xl font-black bg-transparent outline-none text-gray-800" />
+                                    <button onClick={() => setTempYear(y => String(Number(y)+1))} className="p-3 text-gray-400 hover:text-gray-800 transition active:scale-90"><i className="fa-solid fa-plus"></i></button>
+                                </div>
+                                <div className="grid grid-cols-4 gap-3 mb-8">
+                                    {[...Array(12)].map((_, i) => (
+                                        <button key={i} onClick={() => { setCurrentMonth(`${tempYear}-${String(i+1).padStart(2,'0')}`); setShowDatePicker(false); }} className="py-4 rounded-2xl bg-white shadow-md hover:bg-blue-600 hover:text-white font-black text-xs transition-all border border-gray-100">{i+1}月</button>
+                                    ))}
+                                </div>
+                                <button onClick={() => setShowDatePicker(false)} className="w-full py-5 bg-gray-800 text-white font-black rounded-3xl shadow-xl uppercase tracking-[0.3em] text-xs active:scale-95 transition-all">Cancel</button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 漢堡側選單 (Sidebar) */}
+                    {isMenuOpen && (
+                        <div className="fixed inset-0 z-[130] flex">
+                            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)}></div>
+                            <div className="w-72 bg-white/95 backdrop-blur-lg h-full relative flex flex-col animate-in slide-in-from-left shadow-2xl">
+                                <div className="p-10 border-b border-gray-100 flex justify-between items-center bg-gray-50/50"><h2 className="font-black text-2xl text-gray-800 tracking-tighter uppercase italic"><i className="fa-solid fa-wallet text-blue-500 mr-2"></i>My Vault</h2><button onClick={() => setIsMenuOpen(false)} className="text-gray-300 hover:text-gray-800 transition active:scale-90"><i className="fa-solid fa-xmark text-2xl"></i></button></div>
+                                <div className="p-6 space-y-5">
+                                    <button onClick={() => { setIsMenuOpen(false); setActiveTab('home'); }} className="w-full text-left p-6 hover:bg-blue-50 rounded-[32px] font-black text-gray-700 transition-all flex items-center gap-4 shadow-sm border border-transparent hover:border-blue-100 active:scale-95"><i className="fa-solid fa-house text-blue-400 text-xl"></i> 首頁概覽 Dashboard</button>
+                                    <button onClick={() => { setIsMenuOpen(false); setActiveTab('categories'); }} className="w-full text-left p-6 hover:bg-purple-50 rounded-[32px] font-black text-gray-700 transition-all flex items-center gap-4 shadow-sm border border-transparent hover:border-purple-100 active:scale-95"><i className="fa-solid fa-tags text-purple-400 text-xl"></i> 分類管理 Categories</button>
+                                    <button onClick={() => { setIsMenuOpen(false); setActiveTab('settings'); }} className="w-full text-left p-6 hover:bg-gray-100 rounded-[32px] font-black text-gray-700 transition-all flex items-center gap-4 shadow-sm border border-transparent hover:border-gray-200 active:scale-95"><i className="fa-solid fa-gear text-gray-400 text-xl"></i> 視覺設定 System UI</button>
+                                </div>
+                                <div className="mt-auto p-10 text-[10px] font-black text-gray-300 uppercase tracking-[0.5em] text-center border-t border-gray-100">Pure Version 18.0</div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 主要內容分流 */}
+                    {activeTab === 'home' && renderHome()}
+                    {activeTab === 'report' && renderReportView()}
+                    {activeTab === 'categories' && renderCategoryManager()}
+                    {activeTab === 'categoryDetail' && renderCategoryDetail()}
+                    {activeTab === 'settings' && renderSettingsView()}
+                    
+                    {isEditingCats && renderEditCatsModal()}
+                    {isAdding && renderAddForm()}
+
+                    {/* 底部導覽欄 */}
+                    {!isAdding && !['report', 'categoryDetail'].includes(activeTab) && (
+                        <div style={glassStyle} className="fixed bottom-0 left-0 right-0 max-w-md mx-auto glass-panel-base border-t border-white/40 flex justify-between px-10 py-4 pb-safe z-30 shadow-[0_-15px_50px_rgba(0,0,0,0.15)] rounded-t-[40px]">
+                            <button onClick={()=>setActiveTab('home')} className={`p-2 transition-all ${activeTab==='home'?'text-gray-900 scale-125 font-bold':'text-gray-400 opacity-50 hover:opacity-100'}`}><i className="fa-solid fa-house text-2xl"></i></button>
+                            <div className="relative -top-10">
+                                <button onClick={()=>setIsAdding(true)} className="bg-red-500 text-white w-16 h-16 rounded-full flex items-center justify-center shadow-[0_20px_40px_-5px_rgba(239,68,68,0.5)] border-[5px] border-white active:scale-90 hover:bg-red-600 transition-all shadow-2xl"><i className="fa-solid fa-plus text-3xl"></i></button>
+                            </div>
+                            <button onClick={()=>setActiveTab('settings')} className={`p-2 transition-all ${activeTab==='settings'?'text-gray-900 scale-125 font-bold':'text-gray-400 opacity-50 hover:opacity-100'}`}><i className="fa-solid fa-gear text-2xl"></i></button>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
