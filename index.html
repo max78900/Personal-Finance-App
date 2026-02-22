@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Pro版雲端記帳 V18 - 真·視覺引擎版</title>
+    <title>Pro版雲端記帳 V20 - 模組化視覺大師版</title>
     <!-- 載入核心框架 -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -13,20 +13,32 @@
     <style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        .glass-panel-base { backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); box-shadow: 0 8px 32px rgba(0,0,0,0.1); border: 1px solid rgba(255,255,255,0.3); }
+        .glass-panel-base { backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); box-shadow: 0 8px 32px rgba(0,0,0,0.1); border: 1px solid rgba(255,255,255,0.3); transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
         input[type="month"]::-webkit-calendar-picker-indicator,
         input[type="date"]::-webkit-calendar-picker-indicator { background: transparent; cursor: pointer; }
-        /* 背景容器，用於處理旋轉與縮放而不影響內容 */
         #bg-canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: -1; overflow: hidden; pointer-events: none; }
     </style>
 </head>
-<body class="bg-gray-100 text-gray-800 font-sans antialiased m-0 p-0 selection:bg-red-400 selection:text-white">
+<body class="bg-gray-100 text-gray-800 font-sans antialiased m-0 p-0 selection:bg-red-400 selection:text-white overflow-x-hidden">
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
 
-        // === 鎖定預設類別庫 (不可刪除/修改) ===
+        // 輔助函式：Hex 轉 RGBA (為了讓面板自訂顏色能保有透明度)
+        const hexToRgba = (hex, alpha) => {
+            let r = 255, g = 255, b = 255;
+            if (/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)) {
+                let res = hex.substring(1).split('');
+                if (res.length === 3) res = [res[0], res[0], res[1], res[1], res[2], res[2]];
+                res = '0x' + res.join('');
+                r = (res >> 16) & 255;
+                g = (res >> 8) & 255;
+                b = res & 255;
+            }
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        };
+
         const baseExp = [
             { name: '餐飲', icon: 'fa-utensils', color: 'text-orange-500', hex: '#f97316', isDefault: true },
             { name: '遊戲', icon: 'fa-gamepad', color: 'text-purple-500', hex: '#a855f7', isDefault: true },
@@ -38,11 +50,10 @@
             { name: '薪水', icon: 'fa-wallet', color: 'text-green-500', hex: '#22c55e', isDefault: true },
             { name: '獎金', icon: 'fa-sack-dollar', color: 'text-yellow-500', hex: '#eab308', isDefault: true }
         ];
-
         const PREDEFINED_ICONS = ['fa-utensils', 'fa-mug-hot', 'fa-bag-shopping', 'fa-gamepad', 'fa-plane', 'fa-bus', 'fa-dumbbell', 'fa-music', 'fa-house', 'fa-wallet', 'fa-sack-dollar', 'fa-chart-line', 'fa-microchip', 'fa-camera', 'fa-gift', 'fa-heart', 'fa-bolt', 'fa-star'];
 
         const App = () => {
-            // ================= 1. 核心狀態管理 =================
+            // ================= 1. 狀態管理 =================
             const [activeTab, setActiveTab] = useState('home'); 
             const [isAdding, setIsAdding] = useState(false); 
             const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -50,30 +61,31 @@
             const [tempYear, setTempYear] = useState('');
             const [currentMonth, setCurrentMonth] = useState(() => `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`);
             
-            // 資料與 API
             const [records, setRecords] = useState([]);
             const [loading, setLoading] = useState(false);
             const [apiUrl, setApiUrl] = useState(localStorage.getItem('gs_api_url') || '');
             const [apiToken, setApiToken] = useState(localStorage.getItem('gs_api_token') || '12345');
             const [geminiKey, setGeminiKey] = useState(localStorage.getItem('gemini_api_key') || '');
             
-            // 視覺主題設定 (新增 rotation 支援)
             const [appTheme, setAppTheme] = useState(() => JSON.parse(localStorage.getItem('app_theme')) || { type: 'color', value: '#f3f4f6' });
             const [bgImage, setBgImage] = useState(() => localStorage.getItem('custom_bg') || '');
             const [bgSettings, setBgSettings] = useState(() => JSON.parse(localStorage.getItem('bg_settings')) || { zoom: 100, x: 50, y: 50, rotate: 0 });
             const [glassOpacity, setGlassOpacity] = useState(() => Number(localStorage.getItem('glass_opacity')) || 0.85);
 
-            // 分類與報表
+            // 🚀 新增：面板自訂色與摺疊收納狀態
+            const [panelColor, setPanelColor] = useState(() => localStorage.getItem('panel_color') || '#ffffff');
+            const [isConnOpen, setIsConnOpen] = useState(true);
+            const [isVisualOpen, setIsVisualOpen] = useState(true);
+
             const [expenseCategories, setExpenseCategories] = useState(() => JSON.parse(localStorage.getItem('exp_cats')) || baseExp);
             const [incomeCategories, setIncomeCategories] = useState(() => JSON.parse(localStorage.getItem('inc_cats')) || baseInc);
             const [reportType, setReportType] = useState('支出'); 
             const [catType, setCatType] = useState('支出');
             const [isEditingCats, setIsEditingCats] = useState(false);
-            const [editingCatIdx, setEditingCatIdx] = useState(-1); // -1 代表新增模式
+            const [editingCatIdx, setEditingCatIdx] = useState(-1); 
             const [selectedCategory, setSelectedCategory] = useState(null); 
             const [newCat, setNewCat] = useState({ name: '', icon: 'fa-star', color: '', hex: '#3b82f6', isCustomUrl: false, customUrl: '', isDefault: false });
 
-            // 表單
             const [form, setForm] = useState({ type: '支出', category: '餐飲', item: '', amount: '', note: '', date: new Date().toISOString().split('T')[0] });
             const [aiInput, setAiInput] = useState('');
             const [isAiProcessing, setIsAiProcessing] = useState(false);
@@ -82,13 +94,19 @@
                 localStorage.setItem('app_theme', JSON.stringify(appTheme));
                 localStorage.setItem('bg_settings', JSON.stringify(bgSettings));
                 localStorage.setItem('glass_opacity', glassOpacity);
+                localStorage.setItem('panel_color', panelColor);
                 localStorage.setItem('exp_cats', JSON.stringify(expenseCategories));
                 localStorage.setItem('inc_cats', JSON.stringify(incomeCategories));
-            }, [appTheme, bgSettings, glassOpacity, expenseCategories, incomeCategories]);
+            }, [appTheme, bgSettings, glassOpacity, panelColor, expenseCategories, incomeCategories]);
 
-            const glassStyle = { background: `rgba(255, 255, 255, ${glassOpacity})`, backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' };
+            // 動態面板樣式 (結合自訂色與透明度)
+            const glassStyle = { 
+                background: hexToRgba(panelColor, glassOpacity), 
+                backdropFilter: 'blur(12px)', 
+                WebkitBackdropFilter: 'blur(12px)' 
+            };
 
-            // ================= 2. 數據計算系統 =================
+            // ================= 2. 數據計算 =================
             const currentMonthRecords = useMemo(() => {
                 return records.filter(r => r.日期 && r.日期.includes(currentMonth)).sort((a,b) => new Date(b.日期) - new Date(a.日期)); 
             }, [records, currentMonth]);
@@ -158,13 +176,13 @@
                 try {
                     await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ ...form, action: 'add', token: apiToken }) });
                     setForm({ ...form, item: '', amount: '', note: '' }); setIsAdding(false); await fetchFromCloud();
-                } catch (e) { alert('同步失敗'); } finally { setLoading(false); }
+                } catch (e) { alert('失敗'); } finally { setLoading(false); }
             };
 
             const handleAIParse = async () => {
                 if (!geminiKey || !aiInput.trim()) return alert("設定錯誤"); setIsAiProcessing(true);
                 try {
-                    const prompt = `解析JSON陣列。限用支出/收入。輸入:"${aiInput}"。格式:[{"type":"支出/收入","category":"分類","item":"項目","amount":數字,"note":"備註"}]`;
+                    const prompt = `解析JSON陣列。輸入:"${aiInput}"。格式:[{"type":"支出/收入","category":"分類","item":"項目","amount":數字,"note":"備註"}]`;
                     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json" } })
@@ -172,14 +190,13 @@
                     const data = await res.json();
                     const list = JSON.parse(data.candidates[0].content.parts[0].text.replace(/```json|```/g, '').trim());
                     for (const r of (Array.isArray(list)?list:[list])) { await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ ...r, date: form.date, action: 'add', token: apiToken }) }); }
-                    alert("AI 已完成解析與紀錄！"); setAiInput(''); setIsAdding(false); await fetchFromCloud();
+                    alert("AI 已完成解析並寫入！"); setAiInput(''); setIsAdding(false); await fetchFromCloud();
                 } catch (e) { alert("AI 解析失敗"); } finally { setIsAiProcessing(false); }
             };
 
-            const deleteRecord = async (rowIndex) => {
-                if (!confirm('刪除這筆紀錄？')) return; setLoading(true);
-                try { await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ action: 'delete', rowIndex, token: apiToken }) }); await fetchFromCloud(); } 
-                catch (e) { alert('失敗'); } finally { setLoading(false); }
+            const renderIcon = (cat, size = "text-lg") => {
+                if (cat.isCustomUrl && cat.customUrl) return <img src={cat.customUrl} className="w-full h-full object-cover rounded-xl" onError={(e)=>{e.target.src='https://via.placeholder.com/150?text=Error'}} />;
+                return <i className={`fa-solid ${cat.icon || 'fa-border-all'} ${size} ${cat.isDefault ? cat.color : ''}`} style={!cat.isDefault ? {color: cat.hex} : {}}></i>;
             };
 
             const handleImageUpload = (e, target = 'bg') => {
@@ -197,31 +214,32 @@
                         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
                         const base64 = canvas.toDataURL('image/jpeg', 0.8);
                         if(target === 'cat') { setNewCat({...newCat, isCustomUrl: true, customUrl: base64}); }
-                        else { try { localStorage.setItem('custom_bg', base64); setBgImage(base64); setAppTheme({ type: 'custom' }); } catch(err) { alert('圖片體積過大，請選較小的圖片！'); } }
+                        else { try { localStorage.setItem('custom_bg', base64); setBgImage(base64); setAppTheme({ type: 'custom' }); } catch(err) { alert('空間不足！'); } }
                     };
                     img.src = event.target.result;
                 };
                 reader.readAsDataURL(file);
             };
 
-            const renderIcon = (cat, size = "text-lg") => {
-                if (cat.isCustomUrl && cat.customUrl) return <img src={cat.customUrl} className="w-full h-full object-cover rounded-xl" onError={(e)=>{e.target.src='https://via.placeholder.com/150?text=Error'}} />;
-                return <i className={`fa-solid ${cat.icon || 'fa-border-all'} ${size} ${cat.isDefault ? cat.color : ''}`} style={!cat.isDefault ? {color: cat.hex} : {}}></i>;
+            const deleteRecord = async (rowIndex) => {
+                if (!confirm('刪除這筆紀錄？')) return; setLoading(true);
+                try { await fetch(apiUrl, { method: 'POST', body: JSON.stringify({ action: 'delete', rowIndex, token: apiToken }) }); await fetchFromCloud(); } 
+                catch (e) { alert('失敗'); } finally { setLoading(false); }
             };
 
-            // ================= 4. 視圖渲染函數 =================
+            // ================= 4. 視圖渲染 =================
 
             const renderHome = () => (
                 <div className="pb-24 animate-in fade-in duration-300 overflow-y-auto no-scrollbar h-screen px-4">
                     <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/40 flex justify-between items-center sticky top-4 z-10">
                         <button onClick={() => setIsMenuOpen(true)} className="p-1 active:scale-90 transition"><i className="fa-solid fa-bars text-gray-500 text-xl"></i></button>
-                        <div className="font-black text-lg bg-white/60 px-3 py-1 rounded-xl border border-white/50 cursor-pointer flex items-center gap-1 shadow-sm" onClick={() => { setTempYear(currentMonth.split('-')[0]); setShowDatePicker(true); }}>
-                            {currentMonth.split('-')[0]}年{currentMonth.split('-')[1]}月 <i className="fa-solid fa-caret-down text-sm text-gray-500"></i>
+                        <div className="font-black text-lg bg-white/60 px-3 py-1 rounded-lg border border-white/50 cursor-pointer flex items-center gap-1 shadow-sm text-gray-800" onClick={() => { setTempYear(currentMonth.split('-')[0]); setShowDatePicker(true); }}>
+                            {currentMonth.split('-')[0]}年{currentMonth.split('-')[1]}月 <i className="fa-solid fa-caret-down text-sm text-gray-400"></i>
                         </div>
                         <button onClick={fetchFromCloud} className={loading ? 'animate-spin text-blue-500' : 'text-gray-600'}><i className="fa-solid fa-rotate-right text-lg"></i></button>
                     </div>
 
-                    <div style={glassStyle} className="glass-panel-base mt-6 py-6 px-6 rounded-[40px] border border-white/60 shadow-xl relative overflow-hidden text-center">
+                    <div style={glassStyle} className="glass-panel-base mt-6 py-6 px-6 rounded-[32px] border border-white/60 shadow-xl relative overflow-hidden text-center">
                         <div className="flex justify-between mb-4 relative z-10">
                             <div className="cursor-pointer hover:opacity-70 transition-opacity" onClick={() => {setReportType('支出'); setActiveTab('report');}}>
                                 <p className="text-gray-400 font-black text-[10px] uppercase tracking-widest border-b-2 border-yellow-400 pb-1">月支出</p>
@@ -233,15 +251,9 @@
                             </div>
                         </div>
                         <div className="flex justify-center relative my-4 cursor-pointer hover:scale-105 transition-transform" onClick={() => {setReportType('支出'); setActiveTab('report');}}>
-                            <svg viewBox="0 0 42 42" className="w-48 h-48 drop-shadow-2xl">
+                            <svg viewBox="0 0 42 42" className="w-44 h-44 drop-shadow-2xl">
                                 <circle r="15.915" cx="21" cy="21" fill="transparent" stroke="#f3f4f6" strokeWidth="6" />
-                                {(() => {
-                                    let off = 25;
-                                    return categoryBreakdown.map((d, i) => {
-                                        const ret = <circle key={i} r="15.915" cx="21" cy="21" fill="transparent" stroke={d.hex} strokeWidth="6" strokeDasharray={`${d.pct} ${100-d.pct}`} strokeDashoffset={off} className="transition-all duration-700" />;
-                                        off -= d.pct; return ret;
-                                    });
-                                })()}
+                                {(() => { let off = 25; return categoryBreakdown.map((d, i) => { const ret = <circle key={i} r="15.915" cx="21" cy="21" fill="transparent" stroke={d.hex} strokeWidth="6" strokeDasharray={`${d.pct} ${100-d.pct}`} strokeDashoffset={off} className="transition-all duration-700" />; off -= d.pct; return ret; }); })()}
                             </svg>
                             <div className="absolute inset-0 flex flex-col items-center justify-center">
                                 <p className="text-[10px] text-gray-400 font-black tracking-widest uppercase">月結餘</p>
@@ -252,17 +264,18 @@
 
                     <div className="mt-6 space-y-4">
                         {Object.keys(groupedRecords).map(date => (
-                            <div key={date} style={glassStyle} className="glass-panel-base rounded-3xl overflow-hidden border border-white/60 shadow-lg">
-                                <div className="bg-white/40 px-5 py-2.5 flex justify-between border-b border-white/40 font-black text-xs text-gray-500 uppercase tracking-tighter items-center">
+                            <div key={date} style={glassStyle} className="mb-4 glass-panel-base rounded-2xl overflow-hidden border border-white/60 shadow-lg">
+                                <div className="bg-white/40 px-5 py-2.5 flex justify-between border-b border-white/40 font-black text-xs text-gray-400 uppercase tracking-tighter items-center">
                                     <span>{date}</span> <span className={groupedRecords[date].dailyTotal<0?'text-yellow-600':''}>${groupedRecords[date].dailyTotal.toLocaleString()}</span>
                                 </div>
                                 <div className="divide-y divide-gray-200/40">
                                     {groupedRecords[date].records.map((r, i) => {
-                                        const cat = (r.收支 === '收入' ? incomeCategories : expenseCategories).find(c=>c.name===r.類別) || {icon:'fa-border-all', color:'text-gray-400', hex:'#9ca3af'};
+                                        const list = r.收支 === '收入' ? incomeCategories : expenseCategories;
+                                        const cat = list.find(c=>c.name===r.類別) || {icon:'fa-border-all', color:'text-gray-400', hex:'#9ca3af'};
                                         return (
                                             <div key={i} className="px-5 py-4 flex justify-between group relative overflow-hidden items-center hover:bg-white/30 transition-colors">
                                                 <div className="flex items-center gap-4 z-10">
-                                                    <div className={`w-11 h-11 rounded-2xl bg-white shadow-md flex justify-center items-center overflow-hidden`}>{renderIcon(cat)}</div>
+                                                    <div className={`w-11 h-11 rounded-xl bg-white shadow-md flex justify-center items-center overflow-hidden`}>{renderIcon(cat)}</div>
                                                     <div><p className="font-bold text-sm text-gray-800 leading-tight">{r.項目}</p><p className="text-[10px] text-gray-400 mt-1 font-bold italic">{r.類別} {r.備註}</p></div>
                                                 </div>
                                                 <div className="font-black text-gray-800 z-10 text-sm tracking-tight">${Number(r.金額).toLocaleString()}</div>
@@ -284,8 +297,8 @@
                 return (
                     <div className="pb-24 min-h-screen animate-in fade-in duration-300 overflow-y-auto no-scrollbar px-4">
                         <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center">
-                            <button onClick={()=>setActiveTab('home')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100">&lt; 返回</button>
-                            <h2 className="flex-1 text-center font-black text-lg">分類管理</h2>
+                            <button onClick={()=>setActiveTab('home')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 active:scale-90">&lt; 返回</button>
+                            <h2 className="flex-1 text-center font-black text-lg text-gray-800">分類管理</h2>
                             <button onClick={()=>{ setEditingCatIdx(-1); setIsEditingCats(true); }} className="p-2 bg-white rounded-lg shadow-sm border text-gray-600 active:scale-90 transition shadow-lg"><i className="fa-solid fa-pen-to-square"></i></button>
                         </div>
                         <div className="mt-6">
@@ -299,9 +312,9 @@
                                          style={glassStyle} className="glass-panel-base p-5 rounded-[32px] flex justify-between items-center cursor-pointer active:scale-95 hover:scale-[1.02] transition-all border border-white/40 shadow-md">
                                         <div className="flex items-center gap-4">
                                             <div className={`w-14 h-14 rounded-2xl bg-white shadow-inner flex justify-center items-center overflow-hidden`}>{renderIcon(c, "text-xl")}</div>
-                                            <div><p className="font-black text-gray-800 text-lg leading-none mb-1">{c.name}</p><p className="text-[9px] text-gray-400 font-black uppercase tracking-[0.2em]">View Details</p></div>
+                                            <div><p className="font-black text-gray-800 text-lg leading-none mb-1">{c.name}</p><p className="text-[9px] text-gray-400 font-black uppercase tracking-widest">View Details</p></div>
                                         </div>
-                                        <p className="font-black text-gray-800 text-xl tracking-tighter">${(totalByCat[c.name] || 0).toLocaleString()}</p>
+                                        <p className="font-black text-gray-700 text-xl tracking-tighter">${(totalByCat[c.name] || 0).toLocaleString()}</p>
                                     </div>
                                 ))}
                             </div>
@@ -315,25 +328,24 @@
                 const filtered = currentMonthRecords.filter(r => r.類別 === selectedCategory.name && r.收支 === selectedCategory.type);
                 const sum = filtered.reduce((acc, r) => acc + (Number(r.金額) || 0), 0);
                 return (
-                    <div className="pb-24 min-h-screen animate-in slide-in-from-right duration-300 overflow-y-auto no-scrollbar px-4">
+                    <div className="pb-24 min-h-screen animate-in slide-in-from-right duration-300 overflow-y-auto no-scrollbar px-4 text-gray-800">
                         <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center">
-                            <button onClick={()=>setActiveTab('categories')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm">&lt; 返回</button>
-                            <h2 className="flex-1 text-center font-black text-lg px-2 truncate text-gray-800">{selectedCategory.name} 明細</h2><div className="w-16"></div>
+                            <button onClick={()=>setActiveTab('categories')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm active:scale-90">&lt; 返回</button>
+                            <h2 className="flex-1 text-center font-black text-lg px-2 truncate">{selectedCategory.name} 明細</h2><div className="w-16"></div>
                         </div>
-                        <div className="mt-6">
-                            <div style={glassStyle} className="glass-panel-base p-10 rounded-[48px] mb-8 text-center border border-white/80 shadow-2xl">
-                                <div className={`w-20 h-20 rounded-[28px] bg-white mx-auto flex justify-center items-center shadow-xl mb-4 overflow-hidden`}>{renderIcon(selectedCategory, "text-3xl")}</div>
-                                <p className="text-[10px] text-gray-400 font-black tracking-widest uppercase mb-1">{selectedCategory.name} 本月計</p>
-                                <p className="text-4xl font-black text-gray-800 tracking-tighter">${sum.toLocaleString()}</p>
+                        <div className="mt-6 text-gray-800">
+                            <div style={glassStyle} className="glass-panel-base p-10 rounded-[48px] mb-8 text-center border border-white/80 shadow-md">
+                                <div className={`w-20 h-20 rounded-3xl bg-white mx-auto flex justify-center items-center shadow-lg mb-4 overflow-hidden`}>{renderIcon(selectedCategory, "text-3xl")}</div>
+                                <p className="text-[10px] text-gray-400 font-black tracking-widest uppercase">{selectedCategory.name} 本月統計</p>
+                                <p className="text-4xl font-black text-gray-800 mt-2 tracking-tighter">${sum.toLocaleString()}</p>
                             </div>
-                            <div className="space-y-4 px-1">
+                            <div className="space-y-4 px-1 text-gray-800">
                                 {filtered.map((r, i) => (
                                     <div key={i} style={glassStyle} className="glass-panel-base p-5 rounded-3xl flex justify-between items-center border border-white/40 transition-all hover:bg-white/40 shadow-sm">
                                         <div className="flex-1"><p className="font-bold text-gray-800 text-base">{r.項目}</p><p className="text-[10px] text-gray-400 font-black uppercase tracking-tighter mt-1">{r.日期.split(' ')[0]}</p></div>
                                         <p className="font-black text-gray-800 text-xl tracking-tight">${Number(r.金額).toLocaleString()}</p>
                                     </div>
                                 ))}
-                                {filtered.length === 0 && <p className="text-center py-20 text-gray-300 font-black italic uppercase tracking-widest">No Data Found</p>}
                             </div>
                         </div>
                     </div>
@@ -354,15 +366,14 @@
                 return (
                     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4 backdrop-blur-md animate-in fade-in">
                         <div style={glassStyle} className="glass-panel-base w-full max-w-sm p-6 rounded-[48px] border border-white/50 shadow-2xl animate-in zoom-in max-h-[90vh] overflow-y-auto no-scrollbar text-gray-800">
-                            <h3 className="font-black text-2xl mb-2 text-center tracking-tighter">類別大師編輯器</h3>
-                            <p className="text-[9px] text-gray-400 text-center mb-6 uppercase tracking-[0.3em]">Configure Categories</p>
+                            <h3 className="font-black text-2xl mb-2 text-center tracking-tighter">類別管理系統</h3>
                             <div className="space-y-2 mb-6">
                                 {list.map((c, i) => (
                                     <div key={i} className={`p-4 rounded-3xl flex justify-between items-center border transition-all ${editingCatIdx === i ? 'bg-blue-50 border-blue-300 shadow-inner' : 'bg-white/60 border-white shadow-sm'}`}>
-                                        <div className="flex items-center gap-3"><div className={`w-11 h-11 rounded-2xl bg-white flex justify-center items-center shadow-sm overflow-hidden`}>{renderIcon(c)}</div><span className="font-black text-sm text-gray-700">{c.name}</span></div>
+                                        <div className="flex items-center gap-3"><div className={`w-11 h-11 rounded-xl bg-white flex justify-center items-center shadow-sm overflow-hidden`}>{renderIcon(c)}</div><span className="font-black text-sm text-gray-700">{c.name}</span></div>
                                         <div className="flex gap-1">
                                             {!c.isDefault && <button onClick={()=> {setEditingCatIdx(i); setNewCat({...c}); }} className="text-gray-400 p-2 hover:text-blue-500 transition-colors"><i className="fa-solid fa-pen"></i></button>}
-                                            {!c.isDefault && <button onClick={()=>{const n=[...list]; n.splice(i,1); setList(n);}} className="text-red-400 p-2 active:scale-90"><i className="fa-solid fa-trash-can"></i></button>}
+                                            {!c.isDefault && <button onClick={()=>{const n=[...list]; n.splice(i,1); setList(n);}} className="text-red-400 p-2"><i className="fa-solid fa-trash-can"></i></button>}
                                         </div>
                                     </div>
                                 ))}
@@ -372,7 +383,7 @@
                                 <div className="grid grid-cols-2 gap-4">
                                     <label onDrop={(e)=>handleImageUpload(e, 'cat')} onDragOver={e=>e.preventDefault()} className="flex flex-col items-center justify-center border-2 border-dashed border-purple-200 p-4 rounded-[24px] bg-purple-50/20 hover:bg-white cursor-pointer h-24 transition-all">
                                         {newCat.isCustomUrl ? <img src={newCat.customUrl} className="w-12 h-12 rounded-xl object-cover shadow-md mb-1 border-2 border-white" /> : <i className="fa-solid fa-cloud-arrow-up text-2xl text-purple-300"></i>}
-                                        <span className="text-[8px] font-black text-purple-400 mt-1 uppercase tracking-widest text-center">拖曳 Icon</span>
+                                        <span className="text-[8px] font-black text-purple-400 mt-1 uppercase tracking-widest text-center text-nowrap">拖曳自訂 Icon</span>
                                         <input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e, 'cat')} className="hidden" />
                                     </label>
                                     <div className="bg-white/70 p-3 rounded-[24px] border border-white shadow-sm flex flex-col items-center justify-center">
@@ -400,9 +411,9 @@
                 const list = form.type === '支出' ? expenseCategories : incomeCategories;
                 return (
                     <div style={glassStyle} className="fixed inset-0 glass-panel-base z-50 flex flex-col animate-in slide-in-from-bottom duration-200">
-                        <div className="px-4 py-4 flex items-center border-b border-white/50 bg-white/80 shadow-sm sticky top-0 z-10">
+                        <div className="px-4 py-4 flex items-center border-b border-white/50 bg-white/80 shadow-sm sticky top-0 z-10 text-gray-800">
                             <button onClick={() => setIsAdding(false)} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border transition hover:bg-gray-50 active:scale-90">&lt; 返回</button>
-                            <h2 className="flex-1 text-center font-black text-lg text-gray-800">新增紀錄</h2><div className="w-20"></div>
+                            <h2 className="flex-1 text-center font-black text-lg">新增紀錄</h2><div className="w-20"></div>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 space-y-5 no-scrollbar pb-10">
                             <div className="flex bg-white/80 rounded-2xl p-1 shadow-sm border border-white">
@@ -429,8 +440,8 @@
                                 ))}
                             </div>
                             <form onSubmit={saveToCloud} className="space-y-4 bg-white/80 p-8 rounded-[40px] shadow-xl border border-white">
-                                <input type="text" required placeholder="項目名稱 (如：Steam 遊戲)" value={form.item} onChange={e=>setForm({...form, item:e.target.value})} className="w-full border border-gray-100 p-4 rounded-2xl outline-none focus:border-gray-800 font-bold shadow-inner" />
-                                <input type="number" required placeholder="$ 金額" value={form.amount} onChange={e=>setForm({...form, amount:e.target.value})} className="w-full border border-gray-100 p-4 rounded-2xl outline-none text-4xl font-black text-gray-800 shadow-inner" />
+                                <input type="text" required placeholder="項目名稱" value={form.item} onChange={e=>setForm({...form, item:e.target.value})} className="w-full border border-gray-100 p-4 rounded-2xl outline-none focus:border-gray-800 font-black shadow-inner" />
+                                <input type="number" required placeholder="$ 金額" value={form.amount} onChange={e=>setForm({...form, amount:e.target.value})} className="w-full border border-gray-100 p-4 rounded-2xl outline-none text-3xl font-black text-gray-800 shadow-inner" />
                                 <button type="submit" disabled={loading} className="w-full bg-gray-800 text-white font-black py-6 rounded-[28px] mt-4 shadow-2xl hover:bg-black active:scale-95 transition-all tracking-[0.5em] text-sm uppercase">確認寫入</button>
                             </form>
                         </div>
@@ -441,8 +452,8 @@
             const renderReportView = () => {
                 return (
                     <div className="pb-24 min-h-screen animate-in fade-in duration-300 overflow-y-auto no-scrollbar px-4">
-                        <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center">
-                            <button onClick={()=>setActiveTab('home')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border transition">&lt; 返回</button>
+                        <div style={glassStyle} className="glass-panel-base px-4 py-3 rounded-2xl mt-4 border border-white/50 sticky top-4 z-10 flex items-center text-gray-800">
+                            <button onClick={()=>setActiveTab('home')} className="text-sm font-bold bg-white px-4 py-2 rounded-xl shadow-sm border transition active:scale-90">&lt; 返回</button>
                             <div className="flex-1 flex justify-center px-2">
                                 <div className="flex bg-white/80 rounded-xl p-1 shadow-sm border border-white">
                                     {['支出', '收入', '結餘'].map(t => (
@@ -470,7 +481,6 @@
                                             <p className="font-black text-gray-800 text-base">${d.value.toLocaleString()}</p>
                                         </div>
                                     ))}
-                                    {reportData.length === 0 && <p className="p-16 text-gray-400 font-black italic tracking-widest">No Records Yet</p>}
                                 </div>
                             </div>
                         ) : (
@@ -492,63 +502,110 @@
                                         )
                                     })}
                                 </div>
-                                <p className="text-[10px] text-gray-400 italic font-medium">黃色為支出，藍色為收入</p>
                             </div>
                         )}
                     </div>
                 );
             };
 
+            // 🚀 更新：摺疊收納與面板選色器
             const renderSettingsView = () => (
                 <div className="pb-24 min-h-screen animate-in fade-in duration-300 no-scrollbar overflow-y-auto px-5 pt-6 text-gray-800">
                     <div className="flex items-center mb-8">
                         <button onClick={()=>setActiveTab('home')} className="p-3 bg-white rounded-2xl shadow-md border active:scale-90 transition mr-5 text-gray-500"><i className="fa-solid fa-angle-left text-xl"></i></button>
-                        <h2 className="font-black text-2xl tracking-tighter uppercase">視覺與系統引擎</h2>
+                        <h2 className="font-black text-2xl tracking-tighter uppercase">介面視覺系統</h2>
                     </div>
+                    
                     <div className="space-y-6">
-                        <div style={glassStyle} className="glass-panel-base p-7 rounded-[40px] border border-white/60 shadow-xl space-y-4">
-                            <h3 className="font-black border-b border-gray-200/50 pb-3 flex items-center gap-3 text-sm uppercase tracking-widest"><i className="fa-solid fa-cloud text-blue-500"></i>連線設定 API CONFIG</h3>
-                            <input type="password" placeholder="API 網址" className="w-full bg-white/80 border border-gray-100 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm" value={apiUrl} onChange={e=>{setApiUrl(e.target.value);localStorage.setItem('gs_api_url',e.target.value)}} />
-                            <input type="password" placeholder="資料庫密碼" className="w-full bg-white/80 border border-gray-100 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm" value={apiToken} onChange={e=>{setApiToken(e.target.value);localStorage.setItem('gs_api_token',e.target.value)}} />
-                            <input type="password" placeholder="Gemini AI Key" className="w-full bg-blue-50/80 border border-blue-200 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm font-mono" value={geminiKey} onChange={e=>{setGeminiKey(e.target.value);localStorage.setItem('gemini_api_key',e.target.value)}} />
-                        </div>
-                        <div style={glassStyle} className="glass-panel-base p-7 rounded-[40px] border border-white/60 shadow-xl space-y-6">
-                            <h3 className="font-black border-b border-gray-200/50 pb-3 flex items-center gap-3 text-sm uppercase tracking-widest"><i className="fa-solid fa-palette text-purple-500"></i>介面視覺客製化 CUSTOM UI</h3>
-                            <div className="bg-white/50 p-5 rounded-3xl border border-white/80 shadow-inner">
-                                <label className="text-[11px] font-black text-gray-500 block mb-4 uppercase tracking-widest flex justify-between">面板透明度 OPACITY <span className="text-blue-600 font-bold">{Math.round(glassOpacity * 100)}%</span></label>
-                                <input type="range" min="0.1" max="1" step="0.05" value={glassOpacity} onChange={e=>setGlassOpacity(parseFloat(e.target.value))} className="w-full accent-blue-600 shadow-sm" />
-                            </div>
-                            <div>
-                                <label className="text-[11px] font-black text-gray-400 block mb-4 uppercase tracking-widest px-1">快速背景主題 QUICK THEME</label>
-                                <div className="flex gap-4 overflow-x-auto py-2 no-scrollbar px-1 items-center">
-                                    {['#f3f4f6', '#1e293b', '#fbcfe8', '#bbf7d0', '#bfdbfe', '#2d3436'].map(c => (
-                                        <button key={c} onClick={()=>setAppTheme({type:'color', value:c})} className={`min-w-[48px] h-12 rounded-full border-4 transition-all hover:scale-110 active:scale-90 shadow-md ${appTheme.value === c ? 'border-gray-800 scale-110' : 'border-white'}`} style={{backgroundColor:c}}></button>
-                                    ))}
-                                </div>
-                            </div>
-                            <div className="flex gap-4 items-end px-1 pb-2">
-                                <div className="flex-1"><label className="text-[11px] font-black text-gray-400 block mb-3 uppercase tracking-widest">自由選色盤 COLOR PICKER</label>
-                                    <div className="flex items-center gap-4 bg-white/80 p-3 rounded-2xl border border-white shadow-inner"><input type="color" value={appTheme.type==='color'?appTheme.value:'#ffffff'} onChange={e => setAppTheme({type:'color', value: e.target.value})} className="w-11 h-11 rounded-xl cursor-pointer border-none bg-transparent shadow-sm" /><span className="text-xs font-mono font-black text-gray-400 uppercase tracking-widest">{appTheme.value}</span></div>
-                                </div>
-                                <button onClick={()=>setAppTheme({type:'custom'})} className="px-6 py-5 text-xs font-black bg-gray-800 text-white rounded-2xl shadow-2xl flex-shrink-0 active:scale-95 transition-all tracking-tighter">開啟圖片背景</button>
-                            </div>
-                            <label onDrop={(e)=>handleImageUpload(e, 'bg')} onDragOver={e=>e.preventDefault()} className="flex flex-col items-center justify-center border-2 border-dashed border-purple-300 p-12 rounded-[40px] bg-purple-50/40 hover:bg-purple-100/50 cursor-pointer transition-all group">
-                                <i className="fa-solid fa-cloud-arrow-up text-5xl text-purple-400 mb-4 group-hover:scale-110 transition-transform"></i>
-                                <span className="text-[11px] font-black text-purple-800 text-center uppercase tracking-widest leading-relaxed">更換桌布圖片 WALLPAPER ENGINE<br/><span className="text-[8px] font-bold text-purple-400">(直接拖拉圖片至此)</span></span>
-                                <input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e, 'bg')} className="hidden" />
-                            </label>
+                        {/* 1. 連線設定 (摺疊) */}
+                        <div 
+                            style={{ ...glassStyle, background: hexToRgba(panelColor, glassOpacity + 0.1) }} 
+                            className="glass-panel-base rounded-[40px] border border-white/50 shadow-xl overflow-hidden"
+                        >
+                            <button 
+                                onClick={() => setIsConnOpen(!isConnOpen)}
+                                className="w-full p-6 flex justify-between items-center bg-white/10 hover:bg-white/20 transition-all"
+                            >
+                                <h3 className="font-black flex items-center gap-3 text-sm uppercase tracking-widest text-blue-800">
+                                    <i className="fa-solid fa-cloud"></i>連線設定 API CONFIG
+                                </h3>
+                                <i className={`fa-solid fa-chevron-${isConnOpen ? 'up' : 'down'} text-blue-500 transition-all`}></i>
+                            </button>
                             
-                            {/* 背景控制強化：四合一排版控制器 */}
-                            {bgImage && appTheme.type === 'custom' && (
-                                <div className="bg-white/90 p-8 rounded-[40px] border border-gray-100 shadow-2xl space-y-6 animate-in zoom-in duration-300">
-                                    <p className="text-[11px] font-black text-gray-500 border-b pb-3 uppercase tracking-[0.4em] text-center">Wallpaper Adjustment 2.0</p>
-                                    <div className="space-y-6 px-1">
-                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">比例 Zoom</span><input type="range" min="50" max="350" value={bgSettings.zoom} onChange={e=>setBgSettings({...bgSettings, zoom: parseInt(e.target.value)})} className="flex-1 accent-blue-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.zoom}%</span></div>
-                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">左右 X</span><input type="range" min="0" max="100" value={bgSettings.x} onChange={e=>setBgSettings({...bgSettings, x: parseInt(e.target.value)})} className="flex-1 accent-purple-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.x}%</span></div>
-                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">上下 Y</span><input type="range" min="0" max="100" value={bgSettings.y} onChange={e=>setBgSettings({...bgSettings, y: parseInt(e.target.value)})} className="flex-1 accent-purple-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.y}%</span></div>
-                                        <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-red-500 uppercase tracking-widest">旋轉 Angle</span><input type="range" min="0" max="360" value={bgSettings.rotate} onChange={e=>setBgSettings({...bgSettings, rotate: parseInt(e.target.value)})} className="flex-1 accent-emerald-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.rotate}°</span></div>
+                            {isConnOpen && (
+                                <div className="p-6 pt-2 space-y-4 animate-in slide-in-from-top duration-300">
+                                    <input type="password" placeholder="API 網址" className="w-full bg-white/80 border border-gray-100 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm" value={apiUrl} onChange={e=>{setApiUrl(e.target.value);localStorage.setItem('gs_api_url',e.target.value)}} />
+                                    <input type="password" placeholder="資料庫密碼" className="w-full bg-white/80 border border-gray-100 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm" value={apiToken} onChange={e=>{setApiToken(e.target.value);localStorage.setItem('gs_api_token',e.target.value)}} />
+                                    <input type="password" placeholder="Gemini AI Key" className="w-full bg-blue-50/80 border border-blue-200 p-4 rounded-2xl outline-none focus:border-blue-400 shadow-inner text-sm font-mono" value={geminiKey} onChange={e=>{setGeminiKey(e.target.value);localStorage.setItem('gemini_api_key',e.target.value)}} />
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 2. 視覺設定 (摺疊) */}
+                        <div style={glassStyle} className="glass-panel-base rounded-[40px] border border-white/60 shadow-xl overflow-hidden">
+                            <button 
+                                onClick={() => setIsVisualOpen(!isVisualOpen)}
+                                className="w-full p-6 flex justify-between items-center bg-white/10 hover:bg-white/20 transition-all"
+                            >
+                                <h3 className="font-black flex items-center gap-3 text-sm uppercase tracking-widest text-purple-700">
+                                    <i className="fa-solid fa-palette"></i>客製化 CUSTOM UI
+                                </h3>
+                                <i className={`fa-solid fa-chevron-${isVisualOpen ? 'up' : 'down'} text-purple-500 transition-all`}></i>
+                            </button>
+
+                            {isVisualOpen && (
+                                <div className="p-6 pt-2 space-y-6 animate-in slide-in-from-top duration-300">
+                                    <div className="bg-white/50 p-5 rounded-3xl border border-white/80 shadow-inner">
+                                        <label className="text-[11px] font-black text-gray-500 block mb-4 uppercase tracking-widest flex justify-between">面板透明度 <span className="text-blue-600 font-bold">{Math.round(glassOpacity * 100)}%</span></label>
+                                        <input type="range" min="0.1" max="1" step="0.05" value={glassOpacity} onChange={e=>setGlassOpacity(parseFloat(e.target.value))} className="w-full accent-blue-600 shadow-sm" />
                                     </div>
-                                    <button onClick={()=>setBgSettings({zoom:100, x:50, y:50, rotate:0})} className="w-full text-[9px] font-black text-gray-400 uppercase tracking-widest py-3 border-2 border-gray-100 rounded-2xl hover:bg-gray-50 active:scale-95 transition">Reset All Values</button>
+
+                                    {/* 🚀 核心升級：面板選色器 */}
+                                    <div className="bg-white/50 p-5 rounded-3xl border border-white/80 shadow-inner">
+                                        <label className="text-[11px] font-black text-gray-500 block mb-4 uppercase tracking-widest">面板主題色 PANEL COLOR</label>
+                                        <div className="flex items-center gap-4">
+                                            <input type="color" value={panelColor} onChange={e => setPanelColor(e.target.value)} className="w-12 h-12 rounded-xl cursor-pointer border-none bg-transparent" />
+                                            <div className="flex-1">
+                                                <p className="font-mono text-xs font-bold text-gray-400">{panelColor.toUpperCase()}</p>
+                                                <p className="text-[9px] text-gray-400 uppercase tracking-widest mt-1">選取毛玻璃背景的主色調</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="text-[11px] font-black text-gray-400 block mb-4 uppercase tracking-widest px-1">快速背景底色</label>
+                                        <div className="flex gap-4 overflow-x-auto py-2 no-scrollbar px-1 items-center">
+                                            {['#f3f4f6', '#1e293b', '#fbcfe8', '#bbf7d0', '#bfdbfe', '#2d3436'].map(c => (
+                                                <button key={c} onClick={()=>setAppTheme({type:'color', value:c})} className={`min-w-[48px] h-12 rounded-full border-4 transition-all hover:scale-110 active:scale-90 shadow-md ${appTheme.value === c ? 'border-gray-800 scale-110' : 'border-white'}`} style={{backgroundColor:c}}></button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-4 items-end px-1 pb-2">
+                                        <div className="flex-1"><label className="text-[11px] font-black text-gray-400 block mb-3 uppercase tracking-widest">自選背景色</label>
+                                            <div className="flex items-center gap-4 bg-white/80 p-3 rounded-2xl border border-white shadow-inner"><input type="color" value={appTheme.type==='color'?appTheme.value:'#ffffff'} onChange={e => setAppTheme({type:'color', value: e.target.value})} className="w-11 h-11 rounded-xl cursor-pointer border-none bg-transparent shadow-sm" /><span className="text-xs font-mono font-black text-gray-400 uppercase tracking-widest">{appTheme.value}</span></div>
+                                        </div>
+                                        <button onClick={()=>setAppTheme({type:'custom'})} className="px-6 py-5 text-xs font-black bg-gray-800 text-white rounded-2xl shadow-2xl flex-shrink-0 active:scale-95 transition-all">套用桌布</button>
+                                    </div>
+
+                                    <label onDrop={(e)=>handleImageUpload(e, 'bg')} onDragOver={e=>e.preventDefault()} className="flex flex-col items-center justify-center border-2 border-dashed border-purple-300 p-12 rounded-[40px] bg-purple-50/40 hover:bg-purple-100/50 cursor-pointer transition-all group">
+                                        <i className="fa-solid fa-cloud-arrow-up text-5xl text-purple-400 mb-4 group-hover:scale-110 transition-transform"></i>
+                                        <span className="text-[11px] font-black text-purple-800 text-center uppercase tracking-widest leading-relaxed">更換桌布圖片<br/><span className="text-[8px] font-bold text-purple-400">(直接拖拉圖片至此)</span></span>
+                                        <input type="file" accept="image/*" onChange={(e)=>handleImageUpload(e, 'bg')} className="hidden" />
+                                    </label>
+                                    
+                                    {bgImage && appTheme.type === 'custom' && (
+                                        <div className="bg-white/90 p-8 rounded-[40px] border border-gray-100 shadow-2xl space-y-6 animate-in zoom-in duration-300 shadow-inner">
+                                            <p className="text-[11px] font-black text-gray-500 border-b pb-3 uppercase tracking-[0.4em] text-center text-nowrap">Engine 2.0 Control</p>
+                                            <div className="space-y-6 px-1">
+                                                <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">Zoom</span><input type="range" min="50" max="350" value={bgSettings.zoom} onChange={e=>setBgSettings({...bgSettings, zoom: parseInt(e.target.value)})} className="flex-1 accent-blue-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.zoom}%</span></div>
+                                                <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">Offset X</span><input type="range" min="0" max="100" value={bgSettings.x} onChange={e=>setBgSettings({...bgSettings, x: parseInt(e.target.value)})} className="flex-1 accent-purple-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.x}%</span></div>
+                                                <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-gray-400 uppercase tracking-widest">Offset Y</span><input type="range" min="0" max="100" value={bgSettings.y} onChange={e=>setBgSettings({...bgSettings, y: parseInt(e.target.value)})} className="flex-1 accent-purple-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.y}%</span></div>
+                                                <div className="flex items-center gap-4"><span className="text-[10px] font-black w-14 text-red-500 uppercase tracking-widest">Angle</span><input type="range" min="0" max="360" value={bgSettings.rotate} onChange={e=>setBgSettings({...bgSettings, rotate: parseInt(e.target.value)})} className="flex-1 accent-emerald-500" /><span className="text-[10px] font-mono w-10 text-right font-black">{bgSettings.rotate}°</span></div>
+                                            </div>
+                                            <button onClick={()=>setBgSettings({zoom:100, x:50, y:50, rotate:0})} className="w-full text-[9px] font-black text-gray-400 uppercase tracking-widest py-3 border-2 border-gray-100 rounded-2xl hover:bg-gray-50 active:scale-95 transition">Reset Values</button>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -556,22 +613,21 @@
                 </div>
             );
 
-            // ================= 5. 底層背景渲染邏輯 =================
-            // 透過獨立 div + transform 達成精準旋轉而不裁切與拉伸
+            // ================= 5. 底層渲染 =================
             const backgroundLayer = (
                 <div id="bg-canvas">
                     {appTheme.type === 'custom' && bgImage ? (
                         <div className="w-full h-full transition-all duration-300" 
                              style={{
                                  backgroundImage: `url(${bgImage})`,
-                                 backgroundSize: 'auto 100%', // 強制以高度 100% 進行等比例縮放
+                                 backgroundSize: 'auto 100%', 
                                  backgroundPosition: 'center',
                                  backgroundRepeat: 'no-repeat',
                                  transform: `scale(${bgSettings.zoom / 100}) translate(${(bgSettings.x - 50)}%, ${(bgSettings.y - 50)}%) rotate(${bgSettings.rotate}deg)`,
                                  transformOrigin: 'center center'
                              }} />
                     ) : (
-                        <div className="w-full h-full" style={{ backgroundColor: appTheme.value }} />
+                        <div className="w-full h-full transition-all duration-500" style={{ backgroundColor: appTheme.value }} />
                     )}
                 </div>
             );
@@ -599,23 +655,22 @@
                         </div>
                     )}
 
-                    {/* 漢堡側選單 (Sidebar) */}
+                    {/* 漢堡選單 (Sidebar) */}
                     {isMenuOpen && (
                         <div className="fixed inset-0 z-[130] flex">
                             <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setIsMenuOpen(false)}></div>
                             <div className="w-72 bg-white/95 backdrop-blur-lg h-full relative flex flex-col animate-in slide-in-from-left shadow-2xl">
-                                <div className="p-10 border-b border-gray-100 flex justify-between items-center bg-gray-50/50"><h2 className="font-black text-2xl text-gray-800 tracking-tighter uppercase italic"><i className="fa-solid fa-wallet text-blue-500 mr-2"></i>My Vault</h2><button onClick={() => setIsMenuOpen(false)} className="text-gray-300 hover:text-gray-800 transition active:scale-90"><i className="fa-solid fa-xmark text-2xl"></i></button></div>
+                                <div className="p-10 border-b border-gray-100 flex justify-between items-center bg-gray-50/50"><h2 className="font-black text-2xl text-gray-800 tracking-tighter uppercase italic text-nowrap"><i className="fa-solid fa-wallet text-blue-500 mr-2"></i>My Vault</h2><button onClick={() => setIsMenuOpen(false)} className="text-gray-300 hover:text-gray-800 transition active:scale-90"><i className="fa-solid fa-xmark text-2xl"></i></button></div>
                                 <div className="p-6 space-y-5">
                                     <button onClick={() => { setIsMenuOpen(false); setActiveTab('home'); }} className="w-full text-left p-6 hover:bg-blue-50 rounded-[32px] font-black text-gray-700 transition-all flex items-center gap-4 shadow-sm border border-transparent hover:border-blue-100 active:scale-95"><i className="fa-solid fa-house text-blue-400 text-xl"></i> 首頁概覽 Dashboard</button>
                                     <button onClick={() => { setIsMenuOpen(false); setActiveTab('categories'); }} className="w-full text-left p-6 hover:bg-purple-50 rounded-[32px] font-black text-gray-700 transition-all flex items-center gap-4 shadow-sm border border-transparent hover:border-purple-100 active:scale-95"><i className="fa-solid fa-tags text-purple-400 text-xl"></i> 分類管理 Categories</button>
                                     <button onClick={() => { setIsMenuOpen(false); setActiveTab('settings'); }} className="w-full text-left p-6 hover:bg-gray-100 rounded-[32px] font-black text-gray-700 transition-all flex items-center gap-4 shadow-sm border border-transparent hover:border-gray-200 active:scale-95"><i className="fa-solid fa-gear text-gray-400 text-xl"></i> 視覺設定 System UI</button>
                                 </div>
-                                <div className="mt-auto p-10 text-[10px] font-black text-gray-300 uppercase tracking-[0.5em] text-center border-t border-gray-100">Pure Version 18.0</div>
+                                <div className="mt-auto p-10 text-[10px] font-black text-gray-300 uppercase tracking-[0.5em] text-center border-t border-gray-100">Pure Version 20.0</div>
                             </div>
                         </div>
                     )}
 
-                    {/* 主要內容分流 */}
                     {activeTab === 'home' && renderHome()}
                     {activeTab === 'report' && renderReportView()}
                     {activeTab === 'categories' && renderCategoryManager()}
