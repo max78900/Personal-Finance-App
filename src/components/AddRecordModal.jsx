@@ -39,6 +39,7 @@ export default function AddRecordModal() {
             },
             (error) => {
                 console.error("Speech Recognition Error:", error);
+                alert(`語音發生錯誤：${error} - 可以嘗試用 Chrome 瀏覽器重新開啟，或檢查網址列左邊是否封鎖了麥克風。`);
                 setIsListening(false);
             },
             () => setIsListening(false)
